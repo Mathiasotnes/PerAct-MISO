@@ -1,0 +1,6 @@
+[submodule "mod/peract"]
+	path = mod/peract
+	url = https://github.com/peract/peract.git
+[submodule "mod/miso"]
+	path = mod/miso
+	url = https://github.com/ExistentialRobotics/MISO.git

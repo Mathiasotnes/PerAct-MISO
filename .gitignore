@@ -1,0 +1,5 @@
+# Pre-generated datasets to avoid using PyRep
+peract_colab/
+
+# Debug outputs
+debug_plot.png

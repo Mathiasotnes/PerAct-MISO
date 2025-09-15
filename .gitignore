@@ -2,4 +2,8 @@
 peract_colab/
 
 # Debug outputs
-debug_plot.png
+debug_plot*
+
+# Replay buffers
+replay_test/
+replay_train/

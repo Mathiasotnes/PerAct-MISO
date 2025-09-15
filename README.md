@@ -15,9 +15,3 @@ pip install -e mod/RLBench
 
 TODO:
 MISO assumes a system that runs linux+CUDA. Is it possible to develop on macos and verify correctness?
-
-Application ID:
-AA00F068KV
-
-Date:
-14-SEP-2025

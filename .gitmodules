@@ -1,8 +1,8 @@
-[submodule "mod/peract"]
-	path = mod/peract
+[submodule "mod/PerAct"]
+	path = mod/PerAct
 	url = https://github.com/peract/peract.git
-[submodule "mod/miso"]
-	path = mod/miso
+[submodule "mod/MISO"]
+	path = mod/MISO
 	url = https://github.com/ExistentialRobotics/MISO.git
 [submodule "mod/RLBench"]
 	path = mod/RLBench

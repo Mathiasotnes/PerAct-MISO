@@ -4,3 +4,7 @@
 [submodule "mod/miso"]
 	path = mod/miso
 	url = https://github.com/ExistentialRobotics/MISO.git
+[submodule "mod/RLBench"]
+	path = mod/RLBench
+	url = https://github.com/MohitShridhar/RLBench.git
+	branch = peract

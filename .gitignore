@@ -13,3 +13,6 @@ data/
 
 # Workspace settings
 .vscode/
+
+# Python cache
+# __pycache__/

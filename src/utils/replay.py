@@ -1,22 +1,55 @@
-from yarr.utils.observation_type import ObservationElement
-from yarr.replay_buffer import ReplayElement
-from yarr.replay_buffer.uniform_replay_buffer import UniformReplayBuffer
-
-import numpy as np
+##############################################################################################
+## replay.py                                                                                ##
+## Implements PerAct-MISO specific versions of replay based on:                             ##
+## https://colab.research.google.com/drive/1HAqemP4cE81SQ6QO1-N85j5bF4C0qLs0?usp=sharing    ##
+## ---------------------------------------------------------------------------------------- ##
+## Author:   Mathias Otnes                                                                  ##
+## Date:     09/17/2025                                                                     ##
+##############################################################################################
 
 #########################################################
-##                   Replay buffers                    ##
+##                 PerAct-MISO imports                 ##
+#########################################################
+
+from yarr.replay_buffer.uniform_replay_buffer import UniformReplayBuffer
+from yarr.utils.observation_type import ObservationElement
+from yarr.replay_buffer.replay_buffer import ReplayBuffer
+from yarr.replay_buffer import ReplayElement
+
+from rlbench.demo import Demo
+from rlbench.backend.observation import Observation
+from rlbench.utils import get_stored_demo
+from rlbench.backend.utils import extract_obs
+
+import arm.utils as utils
+
+
+#########################################################
+##                      Libraries                      ##
+#########################################################
+
+import numpy as np
+import pickle
+import torch
+import clip
+import os
+
+from typing import List
+
+
+#########################################################
+##                     Public API                      ##
 #########################################################
 
 # Adapted from: https://github.com/stepjam/ARM/blob/main/arm/c2farm/launch_utils.py
-LOW_DIM_SIZE    = 4     # {left_finger_joint, right_finger_joint, gripper_open, timestep}
-IMAGE_SIZE      = 128   # 128x128 - if you want to use higher voxel resolutions like 200^3, you might want to regenerate the dataset with larger images
 def create_replay(
         batch_size: int,
         timesteps: int,
         save_dir: str,
         cameras: list,
         voxel_sizes,
+        image_size=128,
+        low_dim_size=4,
         replay_size=3e5
     ):
 
@@ -30,13 +63,13 @@ def create_replay(
 
     # low_dim_state
     observation_elements = []
-    observation_elements.append(ObservationElement('low_dim_state', (LOW_DIM_SIZE,), np.float32))
+    observation_elements.append(ObservationElement('low_dim_state', (low_dim_size,), np.float32))
 
     # rgb, depth, point cloud, intrinsics, extrinsics
     for cname in cameras:
-        observation_elements.append(ObservationElement('%s_rgb' % cname, (3, IMAGE_SIZE, IMAGE_SIZE,), np.float32))
-        observation_elements.append(ObservationElement('%s_depth' % cname, (1, IMAGE_SIZE, IMAGE_SIZE,), np.float32))
-        observation_elements.append(ObservationElement('%s_point_cloud' % cname, (3, IMAGE_SIZE, IMAGE_SIZE,), np.float32)) # see pyrep/objects/vision_sensor.py on how pointclouds are extracted from depth frames
+        observation_elements.append(ObservationElement('%s_rgb' % cname, (3, image_size, image_size,), np.float32))
+        observation_elements.append(ObservationElement('%s_depth' % cname, (1, image_size, image_size,), np.float32))
+        observation_elements.append(ObservationElement('%s_point_cloud' % cname, (3, image_size, image_size,), np.float32)) # see pyrep/objects/vision_sensor.py on how pointclouds are extracted from depth frames
         observation_elements.append(ObservationElement('%s_camera_extrinsics' % cname, (4, 4,), np.float32))
         observation_elements.append(ObservationElement('%s_camera_intrinsics' % cname, (3, 3,), np.float32))
 
@@ -70,12 +103,62 @@ def create_replay(
     return replay_buffer
 
 
+def fill_replay(
+        replay: ReplayBuffer,
+        start_idx: int,
+        num_demos: int,
+        demo_augmentation: bool,
+        demo_augmentation_every_n: int,
+        cameras: List[str],
+        rlbench_scene_bounds: List[float],  # AKA: DEPTH0_BOUNDS
+        voxel_sizes: List[int],
+        rotation_resolution: int,
+        crop_augmentation: bool,
+        data_path: str,
+        variation_descriptions_pkl: str,
+        episode_folder: str,
+        clip_model = None,
+        device = 'cpu',
+    ):
+    print('Filling replay ...')
+    for d_idx in range(start_idx, start_idx+num_demos):
+        print("Filling demo %d" % d_idx)
+        demo = get_stored_demo(data_path=data_path, index=d_idx)
+
+        # get language goal from disk
+        varation_descs_pkl_file = os.path.join(data_path, episode_folder % d_idx, variation_descriptions_pkl)
+        with open(varation_descs_pkl_file, 'rb') as f:
+          descs = pickle.load(f)
+
+        # extract keypoints
+        episode_keypoints = _keypoint_discovery(demo)
+
+        for i in range(len(demo) - 1):
+            if not demo_augmentation and i > 0:
+                break
+            if i % demo_augmentation_every_n != 0: # choose only every n-th frame
+                continue
+
+            obs = demo[i]
+            desc = descs[0]
+            # if our starting point is past one of the keypoints, then remove it
+            while len(episode_keypoints) > 0 and i >= episode_keypoints[0]:
+                episode_keypoints = episode_keypoints[1:]
+            if len(episode_keypoints) == 0:
+                break
+            _add_keypoints_to_replay(
+                replay, obs, demo, episode_keypoints, cameras,
+                rlbench_scene_bounds, voxel_sizes,
+                rotation_resolution, crop_augmentation, description=desc,
+                clip_model=clip_model, device=device)
+    print('Replay filled with demos.')
+
+
+#########################################################
+##                  Private functions                  ##
+#########################################################
+
 # From https://github.com/stepjam/ARM/blob/main/arm/demo_loading_utils.py
-CAMERAS = ['front', 'left_shoulder', 'right_shoulder', 'wrist']
-
-from rlbench.demo import Demo
-from typing import List
-
 def _is_stopped(demo, i, obs, stopped_buffer, delta=0.1):
     next_is_not_final = i == (len(demo) - 2)
     gripper_state_no_change = (
@@ -88,6 +171,7 @@ def _is_stopped(demo, i, obs, stopped_buffer, delta=0.1):
     small_delta = np.allclose(obs.joint_velocities, 0, atol=delta)
     stopped = (stopped_buffer <= 0 and small_delta and (not next_is_not_final) and gripper_state_no_change)
     return stopped
+
 
 def _keypoint_discovery(demo: Demo, stopping_delta=0.1) -> List[int]:
     episode_keypoints = []
@@ -108,14 +192,6 @@ def _keypoint_discovery(demo: Demo, stopping_delta=0.1) -> List[int]:
     print('Found %d keypoints.' % len(episode_keypoints), episode_keypoints)
     return episode_keypoints
 
-import clip
-import torch
-import arm.utils as utils
-
-from rlbench.backend.observation import Observation
-from yarr.replay_buffer.replay_buffer import ReplayBuffer
-from rlbench.utils import get_stored_demo
-from rlbench.backend.utils import extract_obs
 
 # discretize translation, rotation, gripper open, and ignore collision actions
 def _get_action(
@@ -147,6 +223,7 @@ def _get_action(
     return trans_indicies, rot_and_grip_indicies, ignore_collisions, np.concatenate(
         [obs_tp1.gripper_pose, np.array([grip])]), attention_coordinates
 
+
 # extract CLIP language features for goal string
 def _clip_encode_text(clip_model, text):
     x = clip_model.token_embedding(text).type(clip_model.dtype)  # [batch_size, n_ctx, d_model]
@@ -162,6 +239,7 @@ def _clip_encode_text(clip_model, text):
 
     return x, emb
 
+
 # add individual data points to replay
 def _add_keypoints_to_replay(
         replay: ReplayBuffer,
@@ -175,7 +253,8 @@ def _add_keypoints_to_replay(
         crop_augmentation: bool,
         description: str = '',
         clip_model = None,
-        device = 'cpu'):
+        device = 'cpu'
+    ):
     prev_action = None
     obs = inital_obs
     for k, keypoint in enumerate(episode_keypoints):
@@ -188,7 +267,7 @@ def _add_keypoints_to_replay(
         terminal = (k == len(episode_keypoints) - 1)
         reward = float(terminal) * 1.0 if terminal else 0
 
-        obs_dict = extract_obs(obs, CAMERAS, t=k, prev_action=prev_action)
+        obs_dict = extract_obs(obs, cameras, t=k, prev_action=prev_action)
         tokens = clip.tokenize([description]).numpy()
         token_tensor = torch.from_numpy(tokens).to(device)
         lang_feats, lang_embs = _clip_encode_text(clip_model, token_tensor)
@@ -212,62 +291,9 @@ def _add_keypoints_to_replay(
         obs = obs_tp1
 
     # final step
-    obs_dict_tp1 = extract_obs(obs_tp1, CAMERAS, t=k + 1, prev_action=prev_action)
+    obs_dict_tp1 = extract_obs(obs_tp1, cameras, t=k + 1, prev_action=prev_action)
     obs_dict_tp1['lang_goal_embs'] = lang_embs[0].float().detach().cpu().numpy()
 
     obs_dict_tp1.pop('wrist_world_to_cam', None)
     obs_dict_tp1.update(final_obs)
     replay.add_final(**obs_dict_tp1)
-
-import pickle
-import os
-VARIATION_DESCRIPTIONS_PKL  = 'variation_descriptions.pkl' # the pkl file that contains language goals for each demonstration
-EPISODE_FOLDER              = 'episode%d'
-DATA_FOLDER                 = 'src/data'
-EPISODES_FOLDER             = 'colab_dataset/open_drawer/all_variations/episodes'
-data_path = os.path.join(DATA_FOLDER, EPISODES_FOLDER)
-def fill_replay(replay: ReplayBuffer,
-                start_idx: int,
-                num_demos: int,
-                demo_augmentation: bool,
-                demo_augmentation_every_n: int,
-                cameras: List[str],
-                rlbench_scene_bounds: List[float],  # AKA: DEPTH0_BOUNDS
-                voxel_sizes: List[int],
-                rotation_resolution: int,
-                crop_augmentation: bool,
-                clip_model = None,
-                device = 'cpu'):
-    print('Filling replay ...')
-    for d_idx in range(start_idx, start_idx+num_demos):
-        print("Filling demo %d" % d_idx)
-        demo = get_stored_demo(data_path=data_path,
-                               index=d_idx)
-
-        # get language goal from disk
-        varation_descs_pkl_file = os.path.join(data_path, EPISODE_FOLDER % d_idx, VARIATION_DESCRIPTIONS_PKL)
-        with open(varation_descs_pkl_file, 'rb') as f:
-          descs = pickle.load(f)
-
-        # extract keypoints
-        episode_keypoints = _keypoint_discovery(demo)
-
-        for i in range(len(demo) - 1):
-            if not demo_augmentation and i > 0:
-                break
-            if i % demo_augmentation_every_n != 0: # choose only every n-th frame
-                continue
-
-            obs = demo[i]
-            desc = descs[0]
-            # if our starting point is past one of the keypoints, then remove it
-            while len(episode_keypoints) > 0 and i >= episode_keypoints[0]:
-                episode_keypoints = episode_keypoints[1:]
-            if len(episode_keypoints) == 0:
-                break
-            _add_keypoints_to_replay(
-                replay, obs, demo, episode_keypoints, cameras,
-                rlbench_scene_bounds, voxel_sizes,
-                rotation_resolution, crop_augmentation, description=desc,
-                clip_model=clip_model, device=device)
-    print('Replay filled with demos.')

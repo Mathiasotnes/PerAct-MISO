@@ -7,3 +7,9 @@ debug_plot*
 # Replay buffers
 replay_test/
 replay_train/
+
+# Data
+data/
+
+# Workspace settings
+.vscode/

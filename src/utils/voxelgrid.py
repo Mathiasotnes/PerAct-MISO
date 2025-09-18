@@ -40,17 +40,13 @@ class VoxelGrid(torch.nn.Module):
         self._voxel_shape = [voxel_size] * 3
         self._voxel_d = float(self._voxel_shape[-1])
         self._voxel_feature_size = 4 + feature_size
-        self._voxel_shape_spec = torch.tensor(self._voxel_shape,
-                                              device=device).unsqueeze(
-            0) + 2  # +2 because we crop the edges.
-        self._coord_bounds = torch.tensor(coord_bounds, dtype=torch.float,
-                                          device=device).unsqueeze(0)
+        self._voxel_shape_spec = torch.tensor(self._voxel_shape, device=device).unsqueeze(0) + 2  # +2 because we crop the edges.
+        self._coord_bounds = torch.tensor(coord_bounds, dtype=torch.float, device=device).unsqueeze(0)
         max_dims = self._voxel_shape_spec[0]
         self._total_dims_list = torch.cat(
             [torch.tensor([batch_size], device=device), max_dims,
              torch.tensor([4 + feature_size], device=device)], -1).tolist()
-        self._ones_max_coords = torch.ones((batch_size, max_num_coords, 1),
-                                           device=device)
+        self._ones_max_coords = torch.ones((batch_size, max_num_coords, 1), device=device)
         self._num_coords = max_num_coords
 
         shape = self._total_dims_list
